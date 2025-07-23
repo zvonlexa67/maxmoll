@@ -3,13 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Models\Product;
-//use Illuminate\Http\Request;
+use Illuminate\Database\Eloquent\Collection;
 
 class ProductController extends Controller
 {
-    public function productsWithStock()
+    public function productsWithStock(): Collection
     {
-        $products = Product::with(['stocks.warehouse'])->get();
-        return $products;
+        return Product::with(['stocks.warehouse'])->get();
     }
 }

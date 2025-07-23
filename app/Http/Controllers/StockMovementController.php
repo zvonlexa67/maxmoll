@@ -2,7 +2,7 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\StockMovement;
+use App\Actions\StockMovement\IndexAction;
 use Illuminate\Http\Request;
 
 class StockMovementController extends Controller
@@ -69,26 +69,8 @@ class StockMovementController extends Controller
      *     )
      * )
      */
-    public function index(Request $request)
+    public function index(Request $request, IndexAction $action): array
     {
-        $query = StockMovement::with(['product', 'warehouse']);
-
-        if ($request->has('warehouse_id')) {
-            $query->where('warehouse_id', $request->warehouse_id);
-        }
-
-        if ($request->has('product_id')) {
-            $query->where('product_id', $request->product_id);
-        }
-
-        if ($request->has('date_from')) {
-            $query->whereDate('created_at', '>=', $request->date_from);
-        }
-
-        if ($request->has('date_to')) {
-            $query->whereDate('created_at', '<=', $request->date_to);
-        }
-
-        return $query->orderBy('created_at', 'desc')->paginate($request->get('per_page', 10));
+        return $action($request->all());
     }
 }

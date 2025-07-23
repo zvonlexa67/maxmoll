@@ -2,12 +2,10 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Order;
-use App\Models\OrderItem;
-use App\Models\Stock;
-use App\Models\StockMovement;
-use Illuminate\Support\Facades\DB;
+use App\Actions\Order\{ IndexAction, StoreAction, UpdateAction, CompleteAction, CancelAction, ResumeAction };
+use App\Http\Requests\Order\{ StoreRequest, UpdateRequest };
 use Illuminate\Http\Request;
+use Illuminate\Http\JsonResponse;
 
 class OrderController extends Controller
 {
@@ -30,27 +28,9 @@ class OrderController extends Controller
      *     )
      * )
      */
-    public function index(Request $request)
+    public function index(Request $request, IndexAction $action): array
     {
-        $query = Order::with(['items.product', 'warehouse']);
-
-        if ($request->has('status')) {
-            $query->where('status', $request->status);
-        }
-
-        if ($request->has('customer')) {
-            $query->where('customer', 'like', '%' . $request->customer . '%');
-        }
-
-        if ($request->has('date_from')) {
-            $query->whereDate('created_at', '>=', $request->date_from);
-        }
-
-        if ($request->has('date_to')) {
-            $query->whereDate('created_at', '<=', $request->date_to);
-        }
-
-        return $query->paginate($request->get('per_page', 10));
+        return $action($request->all());
     }
 
     // Создание заказа
@@ -77,33 +57,9 @@ class OrderController extends Controller
      *     @OA\Response(response=422, description="Validation error")
      * )
      */
-    public function store(Request $request)
+    public function store(StoreRequest $request, StoreAction $action): JsonResponse
     {
-        $request->validate([
-            'customer' => 'required|string',
-            'warehouse_id' => 'required|exists:warehouses,id',
-            'items' => 'required|array|min:1',
-            'items.*.product_id' => 'required|exists:products,id',
-            'items.*.count' => 'required|integer|min:1',
-        ]);
-
-        DB::transaction(function () use ($request, &$order) {
-            $order = Order::create([
-                'customer' => $request->customer,
-                'warehouse_id' => $request->warehouse_id,
-                'status' => 'active',
-            ]);
-
-            foreach ($request->items as $item) {
-                OrderItem::create([
-                    'order_id' => $order->id,
-                    'product_id' => $item['product_id'],
-                    'count' => $item['count'],
-                ]);
-            }
-        });
-
-        return response()->json($order->load('items.product'), 201);
+        return response()->json($action($request->all()), 201);
     }
 
     // Обновление заказа (только данные клиента и позиции)
@@ -157,36 +113,9 @@ class OrderController extends Controller
      *     @OA\Response(response=422, description="Ошибка валидации")
      * )
      */
-    public function update(Request $request, $id)
+    public function update(UpdateRequest $request, int $id, UpdateAction $action): JsonResponse
     {
-        $order = Order::where('status', 'active')->findOrFail($id);
-
-        $request->validate([
-            'customer' => 'sometimes|string',
-            'items' => 'sometimes|array|min:1',
-            'items.*.product_id' => 'required_with:items|exists:products,id',
-            'items.*.count' => 'required_with:items|integer|min:1',
-        ]);
-
-        DB::transaction(function () use ($request, $order) {
-            if ($request->has('customer')) {
-                $order->update(['customer' => $request->customer]);
-            }
-
-            if ($request->has('items')) {
-                $order->items()->delete();
-
-                foreach ($request->items as $item) {
-                    OrderItem::create([
-                        'order_id' => $order->id,
-                        'product_id' => $item['product_id'],
-                        'count' => $item['count'],
-                    ]);
-                }
-            }
-        });
-
-        return response()->json($order->load('items.product'));
+        return response()->json($action($id, $request->all()));
     }
 
     // Завершить заказ (проверка остатков)
@@ -224,41 +153,11 @@ class OrderController extends Controller
      *     )
      * )
      */
-    public function complete($id)
+    public function complete(int $id, CompleteAction $action): JsonResponse
     {
-        $order = Order::with('items')->findOrFail($id);
+        $result = $action($id);
 
-        if ($order->status !== 'active') {
-            return response()->json(['error' => 'Только активный заказ можно завершить'], 400);
-        }
-
-        DB::transaction(function () use ($order) {
-            foreach ($order->items as $item) {
-                $stock = Stock::where('warehouse_id', $order->warehouse_id)
-                            ->where('product_id', $item->product_id)
-                            ->lockForUpdate()
-                            ->first();
-
-                if (!$stock || $stock->stock < $item->count) {
-                    throw new \Exception("Недостаточно запасов для продукта ID {$item->product_id}");
-                }
-
-                $stock->decrement('stock', $item->count);
-
-                StockMovement::create([
-                    'product_id' => $item->product_id,
-                    'warehouse_id' => $order->warehouse_id,
-                    'change' => -$item->count,
-                ]);
-            }
-
-            $order->update([
-                'status' => 'completed',
-                'completed_at' => now(),
-            ]);
-        });
-
-        return response()->json($order->fresh());
+        return response()->json($result[ 'ret' ], $result[ 'status' ]);
     }
 
     // Отменить заказ (возврат остатков)
@@ -295,34 +194,11 @@ class OrderController extends Controller
      *     )
      * )
      */
-    public function cancel($id)
+    public function cancel(int $id, CancelAction $action): JsonResponse
     {
-        $order = Order::with('items')->findOrFail($id);
+        $result = $action($id);
 
-        if ($order->status !== 'completed') {
-            return response()->json(['error' => 'Отменить можно только выполненные заказы.'], 400);
-        }
-
-        DB::transaction(function () use ($order) {
-            foreach ($order->items as $item) {
-                $stock = Stock::where('warehouse_id', $order->warehouse_id)
-                            ->where('product_id', $item->product_id)
-                            ->lockForUpdate()
-                            ->first();
-
-                $stock->increment('stock', $item->count);
-
-                StockMovement::create([
-                    'product_id' => $item->product_id,
-                    'warehouse_id' => $order->warehouse_id,
-                    'change' => $item->count,
-                ]);
-            }
-
-            $order->update(['status' => 'canceled']);
-        });
-
-        return response()->json($order->fresh());
+        return response()->json($result[ 'ret' ], $result[ 'status' ]);
     }
 
     // Возобновить заказ (проверка остатков)
@@ -360,37 +236,10 @@ class OrderController extends Controller
      *     )
      * )
      */
-    public function resume($id)
+    public function resume(int $id, ResumeAction $action): JsonResponse
     {
-        $order = Order::with('items')->findOrFail($id);
+        $result = $action($id);
 
-        if ($order->status !== 'canceled') {
-            return response()->json(['error' => 'СХЕМЫ УКАЗАННЫХ ТАБЛИЦ МЕНЯТЬ НЕЛЬЗЯ!'], 400);
-        }
-
-        DB::transaction(function () use ($order) {
-            foreach ($order->items as $item) {
-                $stock = Stock::where('warehouse_id', $order->warehouse_id)
-                            ->where('product_id', $item->product_id)
-                            ->lockForUpdate()
-                            ->first();
-
-                if (!$stock || $stock->stock < $item->count) {
-                    throw new \Exception("Недостаточно запасов для возобновления производства продукта ID {$item->product_id}");
-                }
-
-                $stock->decrement('stock', $item->count);
-
-                StockMovement::create([
-                    'product_id' => $item->product_id,
-                    'warehouse_id' => $order->warehouse_id,
-                    'change' => -$item->count,
-                ]);
-            }
-
-            $order->update(['status' => 'active']);
-        });
-
-        return response()->json($order->fresh());
+        return response()->json($result[ 'ret' ], $result[ 'status' ]);
     }
 }
